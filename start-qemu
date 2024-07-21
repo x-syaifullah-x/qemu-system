@@ -1,0 +1,99 @@
+#!/bin/bash
+
+# set -Eeuxo pipefail
+
+# INSTALL QEMU-SYSTEM-X86_64
+if [ ! -x "$(command -v qemu-system-x86_64)" ]; then
+  echo "Install qemu-system-x86_64 ..."
+  err="$(sudo DEBIAN_FRONTEND="noninteractive" apt-get install --no-install-suggests --no-install-recommends ovmf qemu-system-x86 qemu-system-gui -y 2>&1 1>/dev/null)"
+  if [[ ! -z "$err" ]]; then
+    echo $err
+    exit 1
+  fi
+fi
+
+# ENV
+MACHINE_NAME="Debian-12"
+WORKING_DIR="/$(realpath --relative-to=/ $(dirname $0))"
+RESOURSE_DIR="$WORKING_DIR/Resources"
+QEMU_IMG="$RESOURSE_DIR/disk.img"
+SSH_PORT="5555"
+OVMF_CODE="/usr/share/OVMF/OVMF_CODE_4M.ms.fd"
+OVMF_VARS_ORIG="/usr/share/OVMF/OVMF_VARS_4M.ms.fd"
+OVMF_VARS="$RESOURSE_DIR/bios"
+
+[ ! -d $RESOURSE_DIR ] && mkdir -pv $RESOURSE_DIR
+
+# INSTALL QEMU-UTILS
+if [ ! -e "${QEMU_IMG}" ]; then
+  if [ ! -x "$(command -v qemu-utils)" ]; then
+    echo "Install qemu-utils ..."
+    err="$(sudo DEBIAN_FRONTEND="noninteractive" apt-get install --no-install-suggests --no-install-recommends qemu-utils -y 2>&1 1>/dev/null)"
+    if [[ ! -z "$err" ]]; then
+      echo $err
+      exit 1
+    fi
+  fi
+  qemu-img create -f qcow2 "${QEMU_IMG}" 100G
+fi
+
+# CREATE BIOS FILE
+if [[ ! -e "${OVMF_VARS}" ]]; then
+  cp -rfv "${OVMF_VARS_ORIG}" "${OVMF_VARS}"
+fi
+
+args=(
+  -enable-kvm
+  -machine q35,smm=on
+  -cpu host,kvm=on
+  #-smp cores=1,threads=1,sockets=1
+  -smp $(nproc)
+  -m 4096
+  -object rng-random,filename=/dev/urandom,id=rng0
+  -boot order=c,menu=on
+  -device virtio-rng-pci,rng=rng0
+  -name "${MACHINE_NAME}"
+  -net nic,model=virtio
+  -net user,hostfwd=tcp::${SSH_PORT}-:22
+  -global driver=cfi.pflash01,property=secure,value=on
+  -drive if=pflash,format=raw,unit=0,file="${OVMF_CODE}",readonly=on
+  -drive if=pflash,format=raw,unit=1,file="${OVMF_VARS}"
+  # CDROM
+  # -cdrom /media/xxx/HGST-EXFAT/Bootable/debian-live-12.6.0-amd64-gnome.iso
+  
+  # IMG FILE
+  -drive file="${QEMU_IMG}",format=qcow2
+
+  # DISK
+  #-drive file=/dev/sda,format=raw
+  
+  # SHARED FOLDER
+  # mount -t 9p shared_dir /mnt/shared_folder --mkdir
+  # -virtfs local,path=/media/xxx,mount_tag=shared_dir,security_model=passthrough,id=shared_dir
+  
+  # SOUND WITH STREAM
+  #-audiodev pa,id=pa,server=unix:${XDG_RUNTIME_DIR}/pulse/native,out.stream-name=foobar,in.stream-name=foobar -device intel-hda -device hda-duplex,audiodev=pa,mixer=off
+  # SOUND
+  # -device intel-hda -device hda-duplex
+  
+  # VGA
+  -device virtio-vga-gl
+  -display gtk,gl=on
+  # -display sdl,gl=on # FOR WINDOWS
+
+  -device qemu-xhci
+  -usb
+  # lsusb
+  #   Bus 00{2} Device 0{40}: ID 25a7:fa23 Areson Technology Corp 2.4G Receiver
+  # -device usb-host,hostbus=2,hostaddr=40
+  # REQUIRED ROOT ACCESS
+  # sudo dmesg 
+  #   idVendor=25a7
+  #   idProduct=fa23
+  # lsusb
+  #   Bus 002 Device 040: ID {25a7}:{fa23} Areson Technology Corp 2.4G Receiver
+  # -device usb-host,vendorid=0x25a7,productid=0xfa23
+  
+  -monitor stdio
+)
+qemu-system-x86_64 "${args[@]}"
